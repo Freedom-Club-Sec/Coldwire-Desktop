@@ -1,0 +1,5 @@
+*.swp
+*.swo
+*.swn
+target/
+test_state_file.coldwire
