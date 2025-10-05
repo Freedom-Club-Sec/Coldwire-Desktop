@@ -31,7 +31,7 @@ enum ProxyType {
 fn usage() -> &'static str {
     "\
 Usage:
-  mychat --server <server-url> [--debug] [--use-proxy]
+  coldwire-desktop --server <server-url> --state-file <file-path> [--debug] [--use-proxy]
 If --use-proxy is present you can pass:
   --proxy-type <HTTP|SOCKS4|SOCKS5>    (default: SOCKS5)
   --proxy-addr <host:port>             (default: 127.0.0.1:9050)
