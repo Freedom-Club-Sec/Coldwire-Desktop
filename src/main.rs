@@ -1,24 +1,35 @@
+mod error;
+mod consts;
+
 use std::env;
 use std::process::exit;
+use std::io::Write;
+use std::path::Path;
 
-const DEFAULT_PROXY_ADDR: &str = "127.0.0.1:9050";
+use zeroize::{Zeroize, Zeroizing};
+use crate::error::Error;
+
 
 /// Configuration parsed from CLI
-#[derive(Debug)]
+#[derive(Zeroize, Debug)]
+#[zeroize(drop)]
 struct Config {
-    server_url: String,
-    state_file_path: String,
+    server_url: Option<Zeroizing<String>>,
+    state_file_path: Option<Zeroizing<String>>,
     proxy: Option<ProxyInfo>,
     debug: bool,
 }
 
-#[derive(Debug)]
+#[derive(Zeroize, Debug)]
+#[zeroize(drop)]
 struct ProxyInfo {
-    ptype: ProxyType,
+    #[zeroize(skip)]
+    ptype: ProxyType,    
+
     host: String,
     port: u16,
-    username: Option<String>,
-    password: Option<String>,
+    username: Option<Zeroizing<String>>,
+    password: Option<Zeroizing<String>>
 }
 
 #[derive(Debug)]
@@ -28,10 +39,113 @@ enum ProxyType {
     Socks5,
 }
 
+impl Config {
+    pub fn confirm_proxy_info(&mut self) -> Result<(), Error> {
+        if let Some(proxy) = &self.proxy {
+            let user_part = proxy.username
+                .as_ref()
+                .map(|u| format!(" ({})", u.as_str()))
+                .unwrap_or_default();
+
+            let pass_part = proxy.password
+                .as_ref()
+                .map(|_| " (with password authentication)".to_string())
+                .unwrap_or_default();
+
+            println!(
+                "Configured proxy: {:?} {}:{}{}{}\n",
+                proxy.ptype,
+                proxy.host,
+                proxy.port,
+                user_part,
+                pass_part
+            );
+        } else {
+            println!("No proxy was configured.\n");
+        }
+
+
+        let confirm = prompt_user("Is the proxy configuration correct? [y/N]: ")?;
+        if !confirm.eq_ignore_ascii_case("yes") && !confirm.eq_ignore_ascii_case("y") {
+            println!("Aborting the program for safety.");
+            std::process::exit(2);
+        }
+
+        Ok(())
+    }
+
+
+    pub fn prompt_state_file(&mut self) -> Result<(), Error> {
+        let mut state_file_path = Zeroizing::new(String::new());
+
+        loop {
+            state_file_path = prompt_user(
+                "Enter the state file path (If it does not exist, it will be created): ",
+            )?;
+            if state_file_path.is_empty() {
+                println!("Please enter a valid path!\n");
+                continue;
+            }
+            break;
+        }
+
+        if Path::new(&state_file_path).exists() {
+            let state_file_password = Zeroizing::new(prompt_user("Enter password: ")?);
+        } else {
+            let confirm = prompt_user("File does not exist, would you like to create it? [y/N]: ")?;
+            if !confirm.eq_ignore_ascii_case("yes") && !confirm.eq_ignore_ascii_case("y") {
+                println!("Aborting program.");
+                std::process::exit(2);
+            }
+
+            self.update_server_url()?;
+
+        }
+
+        Ok(())
+    }
+
+    fn update_server_url(&mut self) -> Result<(), Error> {
+        let mut server_url = Zeroizing::new(String::new());
+
+        loop {
+            server_url = prompt_user("Enter server URL: ")?;
+
+            server_url = match clean_server_url(server_url.to_string()) {
+                Ok(u) => Zeroizing::new(u),
+                Err(e) => {
+                    println!("ERROR: {}\n", e);
+                    continue
+                }
+            };
+            break
+        }
+
+        self.server_url = Some(server_url);
+
+        Ok(())
+    }
+}
+
+
+fn prompt_user(msg: &str) -> Result<Zeroizing<String>, Error> {
+    print!("{msg}");
+    std::io::stdout().flush()
+        .map_err(|_| Error::FailedToFlush)?;
+
+    let mut input = Zeroizing::new(String::new());
+    std::io::stdin().read_line(&mut input)
+        .map_err(|_| Error::FailedToReadLine)?;
+
+    Ok(Zeroizing::new(input.trim().to_string()))
+}
+
+
+
 fn usage() -> &'static str {
     "\
 Usage:
-  coldwire-desktop --server <server-url> --state-file <file-path> [--debug] [--use-proxy]
+  coldwire-desktop [--debug] [--use-proxy]
 If --use-proxy is present you can pass:
   --proxy-type <HTTP|SOCKS4|SOCKS5>    (default: SOCKS5)
   --proxy-addr <host:port>             (default: 127.0.0.1:9050)
@@ -43,34 +157,16 @@ If --use-proxy is present you can pass:
 fn parse_args() -> Result<Config, String> {
     let mut args = env::args().skip(1); 
 
-    let mut server_url     : Option<String> = None;
-    let mut state_file_path: Option<String> = None;
-
     let mut use_proxy = false;
     
     let mut proxy_type = ProxyType::Socks5;
-    let mut proxy_addr: Option<String> = None;
-    let mut proxy_user: Option<String> = None;
-    let mut proxy_pass: Option<String> = None;
+    let mut proxy_addr: Option<Zeroizing<String>> = None;
+    let mut proxy_user: Option<Zeroizing<String>> = None;
+    let mut proxy_pass: Option<Zeroizing<String>> = None;
     let mut debug = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--server" => {
-                if let Some(v) = args.next() {
-                    server_url = Some(v);
-                } else {
-                    return Err(String::from("--server requires a value"));
-                }
-            }
-
-            "--state-file" => {
-                if let Some(v) = args.next() {
-                    state_file_path = Some(v);
-                } else {
-                    return Err(String::from("--state-file requires a file name / path"));
-                }
-            }
             "--use-proxy" => {
                 use_proxy = true;
             }
@@ -94,7 +190,7 @@ fn parse_args() -> Result<Config, String> {
 
             "--proxy-addr" => {
                 if let Some(v) = args.next() {
-                    proxy_addr = Some(v);
+                    proxy_addr = Some(Zeroizing::new(v));
                 } else {
                     return Err(String::from("--proxy-addr requires a value"));
                 }
@@ -102,7 +198,7 @@ fn parse_args() -> Result<Config, String> {
 
             "--proxy-user" => {
                 if let Some(v) = args.next() {
-                    proxy_user = Some(v);
+                    proxy_user = Some(Zeroizing::new(v));
                 } else {
                     return Err(String::from("--proxy-user requires a value"));
                 }
@@ -110,7 +206,7 @@ fn parse_args() -> Result<Config, String> {
 
             "--proxy-pass" => {
                 if let Some(v) = args.next() {
-                    proxy_pass = Some(v);
+                    proxy_pass = Some(Zeroizing::new(v));
                 } else {
                     return Err(String::from("--proxy-pass requires a value"));
                 }
@@ -130,26 +226,11 @@ fn parse_args() -> Result<Config, String> {
         }
     }
 
-    // server required
-    let server_url = match server_url {
-        Some(s) => match clean_server_url(s) {
-            Ok(u) => u,
-            Err(e) => return Err(e),
-        },
-        None => return Err(String::from("--server is required")),
-    };
-
-    let state_file_path = match state_file_path {
-        Some(p) => p,
-        None => return Err(String::from("--state-file is required")),
-    };
-
-    // build proxy info if requested
     let proxy = if use_proxy {
-        let addr = proxy_addr.unwrap_or_else(|| DEFAULT_PROXY_ADDR.to_string());
+        let addr = proxy_addr.unwrap_or_else(|| Zeroizing::new(consts::DEFAULT_PROXY_ADDR.to_string()));
         let (host, port) = match parse_proxy_addr(&addr) {
             Ok(hp) => hp,
-            Err(e) => return Err(format!("Invalid proxy address '{}': {}", addr, e)),
+            Err(e) => return Err(format!("Invalid proxy address: {}", e)),
         };
 
         Some(ProxyInfo {
@@ -164,12 +245,15 @@ fn parse_args() -> Result<Config, String> {
     };
 
     return Ok(Config {
-        server_url,
-        state_file_path,
-        proxy,
-        debug,
+        server_url: None,
+        state_file_path: None,
+        proxy: proxy,
+        debug: debug,
     });
 }
+
+
+
 
 /// Normalize and validate server URL:
 /// - If no scheme given, prepend "https://"
@@ -278,32 +362,10 @@ fn parse_proxy_addr(s: &str) -> Result<(String, u16), String> {
 }
 
 fn main() {
-    match parse_args() {
+    let mut cfg = match parse_args() {
         Ok(cfg) => {
-            if cfg.debug {
-                eprintln!("Parsed config: {:#?}", cfg);
-            } else {
-                println!("Server: {}", cfg.server_url);
-                if let Some(p) = &cfg.proxy {
-                    println!(
-                        "Proxy: {:?} {}:{}{}",
-                        p.ptype,
-                        p.host,
-                        p.port,
-                        if p.username.is_some() || p.password.is_some() {
-                            " (with auth)"
-                        } else {
-                            ""
-                        }
-                    );
-                } else {
-                    println!("No proxy");
-                }
-            }
-            // TODO: hand cfg to connection/auth code...
-
-
-
+            cfg
+            
             
         }
         Err(e) => {
@@ -317,5 +379,12 @@ fn main() {
                 exit(1);
             }
         }
-    }
+    };
+
+    cfg.confirm_proxy_info();
+    cfg.prompt_state_file();
+
+    // TODO: hand cfg to connection/auth code...
+
+
 }

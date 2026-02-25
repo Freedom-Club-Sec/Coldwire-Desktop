@@ -1,8 +1,8 @@
 [package]
-name = "hello_ratatui"
-version = "0.1.0"
+name = "coldwire-desktop"
+version = "0.0.1"
 edition = "2021"
 
 [dependencies]
 libcold = "0.0.1"
-crossterm = "0.29"
+zeroize = { version = "1.8", features = ["derive"] }
