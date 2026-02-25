@@ -10,7 +10,6 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::Error;
 
 
-/// Configuration parsed from CLI
 #[derive(Zeroize, Debug)]
 #[zeroize(drop)]
 struct Config {
@@ -18,13 +17,15 @@ struct Config {
     state_file_path: Option<Zeroizing<String>>,
     proxy: Option<ProxyInfo>,
     debug: bool,
+
+    state_file_password: Option<Zeroizing<Vec<u8>>>
 }
 
 #[derive(Zeroize, Debug)]
 #[zeroize(drop)]
 struct ProxyInfo {
     #[zeroize(skip)]
-    ptype: ProxyType,    
+    proxy_type: ProxyType,    
 
     host: String,
     port: u16,
@@ -54,7 +55,7 @@ impl Config {
 
             println!(
                 "Configured proxy: {:?} {}:{}{}{}\n",
-                proxy.ptype,
+                proxy.proxy_type,
                 proxy.host,
                 proxy.port,
                 user_part,
@@ -99,6 +100,18 @@ impl Config {
             }
 
             self.update_server_url()?;
+
+            loop {
+                let state_file_password = Zeroizing::new(prompt_user("Create password: ")?);
+                let state_file_password_confirm = Zeroizing::new(prompt_user("Confirm password: ")?);
+                
+                if state_file_password != state_file_password_confirm {
+                    println!("Password does not match! Try again.\n");
+                    continue;
+                }
+                break;
+            }
+
 
         }
 
@@ -234,7 +247,7 @@ fn parse_args() -> Result<Config, String> {
         };
 
         Some(ProxyInfo {
-            ptype: proxy_type,
+            proxy_type: proxy_type,
             host,
             port,
             username: proxy_user,
@@ -247,6 +260,7 @@ fn parse_args() -> Result<Config, String> {
     return Ok(Config {
         server_url: None,
         state_file_path: None,
+        state_file_password: None,
         proxy: proxy,
         debug: debug,
     });
