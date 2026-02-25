@@ -301,6 +301,10 @@ fn main() {
                 }
             }
             // TODO: hand cfg to connection/auth code...
+
+
+
+            
         }
         Err(e) => {
             if e == "help" {
