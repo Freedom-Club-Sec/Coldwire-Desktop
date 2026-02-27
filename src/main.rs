@@ -1,12 +1,15 @@
 mod error;
 mod consts;
+mod crypto;
 
 use std::env;
 use std::process::exit;
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::Path;
 
 use zeroize::{Zeroize, Zeroizing};
+use libcold;
 use crate::error::Error;
 
 
@@ -18,7 +21,8 @@ struct Config {
     proxy: Option<ProxyInfo>,
     debug: bool,
 
-    state_file_password: Option<Zeroizing<Vec<u8>>>
+    state_file_password_hash: Option<Zeroizing<Vec<u8>>>,
+    state_file_password_hash_salt: Option<Zeroizing<Vec<u8>>>
 }
 
 #[derive(Zeroize, Debug)]
@@ -66,7 +70,7 @@ impl Config {
         }
 
 
-        let confirm = prompt_user("Is the proxy configuration correct? [y/N]: ")?;
+        let confirm = prompt_user("Is the proxy configuration correct? [y/N]: ", true)?;
         if !confirm.eq_ignore_ascii_case("yes") && !confirm.eq_ignore_ascii_case("y") {
             println!("Aborting the program for safety.");
             std::process::exit(2);
@@ -78,10 +82,13 @@ impl Config {
 
     pub fn prompt_state_file(&mut self) -> Result<(), Error> {
         let mut state_file_path = Zeroizing::new(String::new());
+        let mut state_file_password = Zeroizing::new(String::new());
+        let mut state_file_password_salt = Zeroizing::new(vec![0u8; consts::ARGON2ID_SALT_SIZE]);
 
         loop {
             state_file_path = prompt_user(
                 "Enter the state file path (If it does not exist, it will be created): ",
+                true
             )?;
             if state_file_path.is_empty() {
                 println!("Please enter a valid path!\n");
@@ -91,9 +98,50 @@ impl Config {
         }
 
         if Path::new(&state_file_path).exists() {
-            let state_file_password = Zeroizing::new(prompt_user("Enter password: ")?);
+            let mut file = File::open(&state_file_path)
+                .map_err(|_| Error::FailedToOpenFile)?;
+
+            let file_len = file.metadata()
+                .map_err(|_| Error::FailedToGetFileMetadata)?
+                .len();
+
+            // If size is less than argon2id salt size, authentication tag, and nonce, it must be a
+            // corrupted file.
+            if file_len < (consts::ARGON2ID_SALT_SIZE as u64 + 16 + consts::XCHACHA20POLY1305_NONCE_SIZE as u64) {
+                return Err(Error::InvalidStateFile);
+            }
+            
+            file.seek(std::io::SeekFrom::Start(file_len - 32))
+                .map_err(|_| Error::FailedToSeekInFile)?;
+            
+            file.read_exact(&mut state_file_password_salt)
+                .map_err(|_| Error::FailedToReadFile)?;
+
+            
+
+            state_file_password = prompt_user("Enter password: ", false)?;
+
+            
+            // Ciphertext + authentication tag
+            let ct_and_tag_len = file_len - consts::XCHACHA20POLY1305_NONCE_SIZE as u64;
+
+            if ct_and_tag_len > usize::MAX as u64 {
+                return Err(Error::StateFileTooLargeToReadIntoMemory);
+            }
+
+            let mut ct_and_tag = Zeroizing::new(vec![0u8; ct_and_tag_len as usize]);
+
+            file.seek(std::io::SeekFrom::Start(0))
+                .map_err(|_| Error::FailedToSeekInFile)?;
+
+            file.read_exact(&mut ct_and_tag)
+                .map_err(|_| Error::FailedToReadFile)?;
+
+
+
+
         } else {
-            let confirm = prompt_user("File does not exist, would you like to create it? [y/N]: ")?;
+            let confirm = prompt_user("File does not exist, would you like to create it? [y/N]: ", true)?;
             if !confirm.eq_ignore_ascii_case("yes") && !confirm.eq_ignore_ascii_case("y") {
                 println!("Aborting program.");
                 std::process::exit(2);
@@ -102,8 +150,8 @@ impl Config {
             self.update_server_url()?;
 
             loop {
-                let state_file_password = Zeroizing::new(prompt_user("Create password: ")?);
-                let state_file_password_confirm = Zeroizing::new(prompt_user("Confirm password: ")?);
+                state_file_password = prompt_user("Create password: ", false)?;
+                let state_file_password_confirm = prompt_user("Confirm password: ", false)?;
                 
                 if state_file_password != state_file_password_confirm {
                     println!("Password does not match! Try again.\n");
@@ -112,17 +160,84 @@ impl Config {
                 break;
             }
 
-
+            state_file_password_salt = libcold::crypto::generate_secure_random_bytes_whiten(consts::ARGON2ID_SALT_SIZE)
+                .map_err(|_| Error::FailedToGenerateSecureRandomBytes)?;
         }
 
+
+        let state_file_password_hash = libcold::crypto::hash_argon2id(state_file_password.as_bytes(), &state_file_password_salt)
+            .map_err(|_| Error::Argon2IdHashingError)?;
+ 
+        let state_file_password_hash = Zeroizing::new(state_file_password_hash[..32].to_vec());
+
+        self.state_file_path = Some(state_file_path);
+        self.state_file_password_hash = Some(state_file_password_hash);
+        self.state_file_password_hash_salt = Some(state_file_password_salt);
+
+
+        self.save_state_file()?;
+
+
         Ok(())
+    }
+
+    fn save_state_file(&mut self) -> Result<(), Error> {
+        let state_file_path = self.state_file_path
+            .as_ref()
+            .unwrap();
+
+        let state_file_password_hash = self.state_file_password_hash
+            .as_ref()
+            .unwrap();
+
+        let state_file_password_hash_salt = self.state_file_password_hash_salt
+            .as_ref()
+            .unwrap();
+
+
+        let server_url = self.server_url
+            .as_ref()
+            .unwrap()
+            .as_bytes();
+
+
+        let mut file = File::create(state_file_path)
+            .map_err(|_| Error::FailedToCreateFile)?;
+        
+        let mut payload_plaintext = Zeroizing::new(Vec::with_capacity(
+                server_url.len()
+            )
+        );
+
+        payload_plaintext.extend_from_slice(server_url);
+
+        let (encrypted_payload, encrypted_payload_nonce) = crypto::encrypt_xchacha20poly1305(state_file_password_hash, payload_plaintext.as_slice(), None, 0)?;
+
+        let mut final_payload_plaintext = Zeroizing::new(Vec::with_capacity(
+                payload_plaintext.as_slice().len() +
+                16 + 
+                consts::XCHACHA20POLY1305_NONCE_SIZE + 
+                consts::ARGON2ID_SALT_SIZE
+            )
+        );
+        final_payload_plaintext.extend_from_slice(payload_plaintext.as_slice());
+        final_payload_plaintext.extend_from_slice(encrypted_payload.as_slice());
+        final_payload_plaintext.extend_from_slice(encrypted_payload_nonce.as_slice());
+        final_payload_plaintext.extend_from_slice(state_file_password_hash_salt.as_slice());
+
+
+        file.write_all(final_payload_plaintext.as_slice())
+            .map_err(|_| Error::FailedToWriteToFile)?;
+
+        Ok(())
+
     }
 
     fn update_server_url(&mut self) -> Result<(), Error> {
         let mut server_url = Zeroizing::new(String::new());
 
         loop {
-            server_url = prompt_user("Enter server URL: ")?;
+            server_url = prompt_user("Enter server URL: ", true)?;
 
             server_url = match clean_server_url(server_url.to_string()) {
                 Ok(u) => Zeroizing::new(u),
@@ -141,7 +256,7 @@ impl Config {
 }
 
 
-fn prompt_user(msg: &str) -> Result<Zeroizing<String>, Error> {
+fn prompt_user(msg: &str, trim: bool) -> Result<Zeroizing<String>, Error> {
     print!("{msg}");
     std::io::stdout().flush()
         .map_err(|_| Error::FailedToFlush)?;
@@ -150,7 +265,11 @@ fn prompt_user(msg: &str) -> Result<Zeroizing<String>, Error> {
     std::io::stdin().read_line(&mut input)
         .map_err(|_| Error::FailedToReadLine)?;
 
-    Ok(Zeroizing::new(input.trim().to_string()))
+    if trim {
+        return Ok(Zeroizing::new(input.trim().to_string()));
+    }
+
+    Ok(Zeroizing::new(input.to_string()))
 }
 
 
@@ -260,7 +379,8 @@ fn parse_args() -> Result<Config, String> {
     return Ok(Config {
         server_url: None,
         state_file_path: None,
-        state_file_password: None,
+        state_file_password_hash: None,
+        state_file_password_hash_salt: None,
         proxy: proxy,
         debug: debug,
     });
@@ -375,13 +495,10 @@ fn parse_proxy_addr(s: &str) -> Result<(String, u16), String> {
     return Ok((host.to_string(), port));
 }
 
-fn main() {
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = match parse_args() {
-        Ok(cfg) => {
-            cfg
-            
-            
-        }
+        Ok(cfg) => cfg,
         Err(e) => {
             if e == "help" {
                 println!("{}", usage());
@@ -395,10 +512,18 @@ fn main() {
         }
     };
 
-    cfg.confirm_proxy_info();
-    cfg.prompt_state_file();
+    if let Err(e) = cfg.confirm_proxy_info() {
+        eprintln!("ERROR: {:?}", e); 
+        std::process::exit(1);
+    }
 
-    // TODO: hand cfg to connection/auth code...
+
+    
+    if let Err(e) = cfg.prompt_state_file() {
+        eprintln!("ERROR: {:?}", e); 
+        std::process::exit(1);
+    }
 
 
+    Ok(())
 }

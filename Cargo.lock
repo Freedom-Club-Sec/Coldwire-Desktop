@@ -179,7 +179,9 @@ dependencies = [
 name = "coldwire-desktop"
 version = "0.0.1"
 dependencies = [
+ "chacha20poly1305",
  "libcold",
+ "rand",
  "zeroize",
 ]
 
@@ -366,9 +368,9 @@ checksum = "58f929b4d672ea937a23a1ab494143d968337a5f47e56d0815df1e0890ddf174"
 
 [[package]]
 name = "libcold"
-version = "0.0.1"
+version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b26ad83306c334ab45275a83691de05c06a8df48ad52412351c8ab3b32cdc26f"
+checksum = "31f81716b39408268ba1d7badbf73c43621bfc5177045cfa15704821314c5c5a"
 dependencies = [
  "argon2",
  "chacha20poly1305",

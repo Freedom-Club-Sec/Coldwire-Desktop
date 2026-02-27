@@ -1,8 +1,10 @@
 [package]
 name = "coldwire-desktop"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-libcold = "0.0.1"
+libcold = "0.0.2"
 zeroize = { version = "1.8", features = ["derive"] }
+chacha20poly1305 = "0.10.1"
+rand = "0.9.2"
