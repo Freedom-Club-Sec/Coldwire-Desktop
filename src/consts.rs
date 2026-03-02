@@ -12,3 +12,5 @@ pub const XCHACHA20POLY1305_SIZE_LEN: usize = 2;
 
 /// Default maximum random padding
 pub const XCHACHA20POLY1305_MAX_RANDOM_PAD: usize = 64;
+
+

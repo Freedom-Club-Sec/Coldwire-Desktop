@@ -19,6 +19,10 @@ use crate::error::Error;
 #[zeroize(drop)]
 struct Config {
     server_url: Option<Zeroizing<String>>,
+
+    auth_secret_key: Option<Zeroizing<Vec<u8>>>,
+    auth_public_key: Option<Zeroizing<Vec<u8>>>,
+
     state_file_path: Option<Zeroizing<String>>,
     proxy: Option<ProxyInfo>,
     debug: bool,
@@ -238,6 +242,20 @@ impl Config {
 
                 self.server_url = Some(utf8_string);
 
+            } else if tag == "auth_secret_key" {
+                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
+                    .map_err(|_| Error::FailedToDecodeBase64)?);
+
+
+                self.auth_secret_key = Some(decoded);
+
+            } else if tag == "auth_public_key" {
+                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
+                    .map_err(|_| Error::FailedToDecodeBase64)?);
+
+
+                self.auth_public_key = Some(decoded);
+
             } else {
                 return Err(Error::StateFileCorrupted);
             }
@@ -323,6 +341,10 @@ impl Config {
         self.server_url = Some(server_url);
 
         Ok(())
+    }
+ 
+    fn authenticate(&mut self) -> Result<(), Error> {
+        Ok(())        
     }
 }
 
@@ -449,6 +471,9 @@ fn parse_args() -> Result<Config, String> {
 
     return Ok(Config {
         server_url: None,
+        auth_secret_key: None,
+        auth_public_key: None,
+
         state_file_path: None,
         state_file_password_hash: None,
         state_file_password_hash_salt: None,
@@ -595,6 +620,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+
+    if let Err(e) = cfg.authenticate() {
+        eprintln!("ERROR: {:?}", e); 
+        std::process::exit(1);
+    }
 
     Ok(())
 }
