@@ -9,6 +9,8 @@ use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::Path;
 
 use zeroize::{Zeroize, Zeroizing};
+use base64::prelude::*; // {BASE64_STANDARD};
+
 use libcold;
 use crate::error::Error;
 
@@ -82,8 +84,7 @@ impl Config {
 
     pub fn prompt_state_file(&mut self) -> Result<(), Error> {
         let mut state_file_path = Zeroizing::new(String::new());
-        let mut state_file_password = Zeroizing::new(String::new());
-        let mut state_file_password_salt = Zeroizing::new(vec![0u8; consts::ARGON2ID_SALT_SIZE]);
+        
 
         loop {
             state_file_path = prompt_user(
@@ -98,47 +99,8 @@ impl Config {
         }
 
         if Path::new(&state_file_path).exists() {
-            let mut file = File::open(&state_file_path)
-                .map_err(|_| Error::FailedToOpenFile)?;
-
-            let file_len = file.metadata()
-                .map_err(|_| Error::FailedToGetFileMetadata)?
-                .len();
-
-            // If size is less than argon2id salt size, authentication tag, and nonce, it must be a
-            // corrupted file.
-            if file_len < (consts::ARGON2ID_SALT_SIZE as u64 + 16 + consts::XCHACHA20POLY1305_NONCE_SIZE as u64) {
-                return Err(Error::InvalidStateFile);
-            }
-            
-            file.seek(std::io::SeekFrom::Start(file_len - 32))
-                .map_err(|_| Error::FailedToSeekInFile)?;
-            
-            file.read_exact(&mut state_file_password_salt)
-                .map_err(|_| Error::FailedToReadFile)?;
-
-            
-
-            state_file_password = prompt_user("Enter password: ", false)?;
-
-            
-            // Ciphertext + authentication tag
-            let ct_and_tag_len = file_len - consts::XCHACHA20POLY1305_NONCE_SIZE as u64;
-
-            if ct_and_tag_len > usize::MAX as u64 {
-                return Err(Error::StateFileTooLargeToReadIntoMemory);
-            }
-
-            let mut ct_and_tag = Zeroizing::new(vec![0u8; ct_and_tag_len as usize]);
-
-            file.seek(std::io::SeekFrom::Start(0))
-                .map_err(|_| Error::FailedToSeekInFile)?;
-
-            file.read_exact(&mut ct_and_tag)
-                .map_err(|_| Error::FailedToReadFile)?;
-
-
-
+            self.prompt_and_decrypt_state_file(&state_file_path)?;
+            self.state_file_path = Some(state_file_path);
 
         } else {
             let confirm = prompt_user("File does not exist, would you like to create it? [y/N]: ", true)?;
@@ -150,33 +112,137 @@ impl Config {
             self.update_server_url()?;
 
             loop {
-                state_file_password = prompt_user("Create password: ", false)?;
+                let state_file_password = prompt_user("Create password: ", false)?;
                 let state_file_password_confirm = prompt_user("Confirm password: ", false)?;
                 
                 if state_file_password != state_file_password_confirm {
                     println!("Password does not match! Try again.\n");
                     continue;
                 }
+            
+                let state_file_password_salt = libcold::crypto::generate_secure_random_bytes_whiten(consts::ARGON2ID_SALT_SIZE)
+                    .map_err(|_| Error::FailedToGenerateSecureRandomBytes)?;
+
+
+                let state_file_password_hash = libcold::crypto::hash_argon2id(state_file_password.as_bytes(), &state_file_password_salt)
+                .map_err(|_| Error::Argon2IdHashingError)?;
+     
+                let state_file_password_hash = Zeroizing::new(state_file_password_hash[..32].to_vec());
+
+
+                self.state_file_password_hash = Some(state_file_password_hash);
+                self.state_file_password_hash_salt = Some(state_file_password_salt);
+
+                self.state_file_path = Some(state_file_path);
+
+                self.save_state_file()?;
+
                 break;
             }
 
-            state_file_password_salt = libcold::crypto::generate_secure_random_bytes_whiten(consts::ARGON2ID_SALT_SIZE)
-                .map_err(|_| Error::FailedToGenerateSecureRandomBytes)?;
+            
         }
+
+        Ok(())
+    }
+
+    fn prompt_and_decrypt_state_file(&mut self, state_file_path: &str) -> Result<(), Error> {
+        let mut state_file_password_salt = Zeroizing::new(vec![0u8; consts::ARGON2ID_SALT_SIZE]);
+
+        let mut file = File::open(&state_file_path)
+            .map_err(|_| Error::FailedToOpenFile)?;
+
+        let file_len = file.metadata()
+            .map_err(|_| Error::FailedToGetFileMetadata)?
+            .len();
+
+        // If size is less than argon2id salt size, authentication tag, and nonce, it must be a
+        // corrupted file.
+        if file_len < (consts::ARGON2ID_SALT_SIZE as u64 + 16 + consts::XCHACHA20POLY1305_NONCE_SIZE as u64) {
+            return Err(Error::InvalidStateFile);
+        }
+        
+        file.seek(std::io::SeekFrom::Start(file_len - consts::ARGON2ID_SALT_SIZE as u64))
+            .map_err(|_| Error::FailedToSeekInFile)?;
+        
+        file.read_exact(&mut state_file_password_salt)
+            .map_err(|_| Error::FailedToReadFile)?;
+
+
+        let state_file_password = prompt_user("Enter password: ", false)?;
+
+        
+        // Ciphertext + authentication tag
+        let ct_and_tag_len = file_len - consts::XCHACHA20POLY1305_NONCE_SIZE as u64 - consts::ARGON2ID_SALT_SIZE as u64;
+
+        if ct_and_tag_len > usize::MAX as u64 {
+            return Err(Error::StateFileTooLargeToReadIntoMemory);
+        }
+
+        let mut ct_and_tag = Zeroizing::new(vec![0u8; ct_and_tag_len as usize]);
+
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| Error::FailedToSeekInFile)?;
+
+        file.read_exact(&mut ct_and_tag)
+            .map_err(|_| Error::FailedToReadFile)?;
+
+
+
+        // Ciphertext's nonce
+        let mut nonce = Zeroizing::new(vec![0u8; consts::XCHACHA20POLY1305_NONCE_SIZE]);
+
+        file.seek(std::io::SeekFrom::Start(ct_and_tag_len))
+            .map_err(|_| Error::FailedToSeekInFile)?;
+
+        file.read_exact(&mut nonce)
+            .map_err(|_| Error::FailedToReadFile)?;
 
 
         let state_file_password_hash = libcold::crypto::hash_argon2id(state_file_password.as_bytes(), &state_file_password_salt)
-            .map_err(|_| Error::Argon2IdHashingError)?;
- 
+        .map_err(|_| Error::Argon2IdHashingError)?;
+
         let state_file_password_hash = Zeroizing::new(state_file_password_hash[..32].to_vec());
 
-        self.state_file_path = Some(state_file_path);
+        let plaintext = crypto::decrypt_xchacha20poly1305(&state_file_password_hash, &nonce, &ct_and_tag)?;
+
+        self.parse_decrypted_state_content(plaintext.as_slice())?;
+
+
         self.state_file_password_hash = Some(state_file_password_hash);
         self.state_file_password_hash_salt = Some(state_file_password_salt);
 
+        Ok(())
+    }
 
-        self.save_state_file()?;
 
+    fn parse_decrypted_state_content(&mut self, plaintext: &[u8]) -> Result<(), Error> {
+        let plaintext_string = std::str::from_utf8(plaintext)
+            .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
+
+        for line in plaintext_string.lines() {
+            // skip empty lines
+            if line.trim().is_empty() {
+                continue;
+            }
+            
+            let (tag, b64) = line.split_once(':')
+                .ok_or(Error::FailedToSplitLineOnce)?;
+    
+            if tag == "server_url" {
+                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
+                    .map_err(|_| Error::FailedToDecodeBase64)?);
+
+                let utf8_string = Zeroizing::new(String::from_utf8(decoded.to_vec())
+                    .map_err(|_| Error::FailedToConvertBytesToUtf8)?);
+
+                self.server_url = Some(utf8_string);
+
+            } else {
+                return Err(Error::StateFileCorrupted);
+            }
+            
+        }
 
         Ok(())
     }
@@ -195,32 +261,37 @@ impl Config {
             .unwrap();
 
 
-        let server_url = self.server_url
+
+        let tag_separator = b":";
+
+        let server_url_tag = b"server_url";
+
+        let server_url_base64 = BASE64_STANDARD.encode(self.server_url
             .as_ref()
             .unwrap()
-            .as_bytes();
+            .as_bytes());
 
 
         let mut file = File::create(state_file_path)
             .map_err(|_| Error::FailedToCreateFile)?;
         
         let mut payload_plaintext = Zeroizing::new(Vec::with_capacity(
-                server_url.len()
+                server_url_tag.len() + tag_separator.len() + server_url_base64.as_bytes().len()
             )
         );
 
-        payload_plaintext.extend_from_slice(server_url);
+        payload_plaintext.extend_from_slice(server_url_tag);
+        payload_plaintext.extend_from_slice(tag_separator);
+        payload_plaintext.extend_from_slice(server_url_base64.as_bytes());
 
         let (encrypted_payload, encrypted_payload_nonce) = crypto::encrypt_xchacha20poly1305(state_file_password_hash, payload_plaintext.as_slice(), None, 0)?;
 
         let mut final_payload_plaintext = Zeroizing::new(Vec::with_capacity(
-                payload_plaintext.as_slice().len() +
-                16 + 
+                encrypted_payload.as_slice().len() +
                 consts::XCHACHA20POLY1305_NONCE_SIZE + 
                 consts::ARGON2ID_SALT_SIZE
             )
         );
-        final_payload_plaintext.extend_from_slice(payload_plaintext.as_slice());
         final_payload_plaintext.extend_from_slice(encrypted_payload.as_slice());
         final_payload_plaintext.extend_from_slice(encrypted_payload_nonce.as_slice());
         final_payload_plaintext.extend_from_slice(state_file_password_hash_salt.as_slice());

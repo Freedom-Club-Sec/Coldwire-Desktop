@@ -21,7 +21,13 @@ pub enum Error {
     XChaCha20DecryptionFailed,
     XChaCha20MalformedPadding,
 
-    StateFileTooLargeToReadIntoMemory
+    StateFileTooLargeToReadIntoMemory,
+
+    FailedToConvertBytesToUtf8,
+    FailedToDecodeBase64,
+    FailedToSplitLineOnce,
+
+    StateFileCorrupted
 
 
 }
