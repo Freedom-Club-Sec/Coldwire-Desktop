@@ -1,6 +1,9 @@
 mod error;
+mod json;
 mod consts;
 mod crypto;
+mod requests;
+mod url_encode;
 
 use std::env;
 use std::process::exit;
@@ -9,7 +12,7 @@ use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::Path;
 
 use zeroize::{Zeroize, Zeroizing};
-use base64::prelude::*; // {BASE64_STANDARD};
+use base64::prelude::*;
 
 use libcold;
 use crate::error::Error;
@@ -19,6 +22,9 @@ use crate::error::Error;
 #[zeroize(drop)]
 struct Config {
     server_url: Option<Zeroizing<String>>,
+
+    user_id: Option<Zeroizing<String>>,
+    auth_token: Option<Zeroizing<String>>,
 
     auth_secret_key: Option<Zeroizing<Vec<u8>>>,
     auth_public_key: Option<Zeroizing<Vec<u8>>>,
@@ -143,8 +149,6 @@ impl Config {
 
                 break;
             }
-
-            
         }
 
         Ok(())
@@ -233,28 +237,28 @@ impl Config {
             let (tag, b64) = line.split_once(':')
                 .ok_or(Error::FailedToSplitLineOnce)?;
     
-            if tag == "server_url" {
-                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
+            let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
                     .map_err(|_| Error::FailedToDecodeBase64)?);
 
+
+            if tag == "server_url" {
                 let utf8_string = Zeroizing::new(String::from_utf8(decoded.to_vec())
                     .map_err(|_| Error::FailedToConvertBytesToUtf8)?);
 
                 self.server_url = Some(utf8_string);
 
             } else if tag == "auth_secret_key" {
-                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
-                    .map_err(|_| Error::FailedToDecodeBase64)?);
-
-
                 self.auth_secret_key = Some(decoded);
 
             } else if tag == "auth_public_key" {
-                let decoded = Zeroizing::new(BASE64_STANDARD.decode(b64)
-                    .map_err(|_| Error::FailedToDecodeBase64)?);
-
-
                 self.auth_public_key = Some(decoded);
+
+            } else if tag == "user_id" {
+                let s = Zeroizing::new(String::from_utf8(decoded.to_vec())
+                        .map_err(|_| Error::FailedToConvertBytesToUtf8)?);
+
+                self.user_id = Some(s);
+
 
             } else {
                 return Err(Error::StateFileCorrupted);
@@ -278,11 +282,23 @@ impl Config {
             .as_ref()
             .unwrap();
 
+        if self.auth_secret_key.as_ref().is_none() || self.auth_public_key.as_ref().is_none() {
+            let (new_auth_pk, new_auth_sk) = libcold::crypto::generate_ml_dsa_87_keypair()
+                                                .map_err(|_| Error::FailedToGenerateAuthKeypair)?;
+
+            self.auth_public_key = Some(new_auth_pk);
+            self.auth_secret_key = Some(new_auth_sk);
+        }
+
+
+
 
 
         let tag_separator = b":";
 
         let server_url_tag = b"server_url";
+        let auth_pk_tag = b"auth_public_key";
+        let auth_sk_tag = b"auth_secret_key";
 
         let server_url_base64 = BASE64_STANDARD.encode(self.server_url
             .as_ref()
@@ -290,17 +306,50 @@ impl Config {
             .as_bytes());
 
 
+        let auth_pk_base64 = BASE64_STANDARD.encode(self.auth_public_key.as_ref().unwrap());
+        let auth_sk_base64 = BASE64_STANDARD.encode(self.auth_secret_key.as_ref().unwrap());
+
+
         let mut file = File::create(state_file_path)
             .map_err(|_| Error::FailedToCreateFile)?;
         
         let mut payload_plaintext = Zeroizing::new(Vec::with_capacity(
-                server_url_tag.len() + tag_separator.len() + server_url_base64.as_bytes().len()
+                server_url_tag.len() + 
+                tag_separator.len() + 
+                server_url_base64.as_bytes().len() + 
+                1 +
+                auth_pk_tag.len() +
+                tag_separator.len() + 
+                auth_pk_base64.as_bytes().len() 
             )
         );
 
         payload_plaintext.extend_from_slice(server_url_tag);
         payload_plaintext.extend_from_slice(tag_separator);
         payload_plaintext.extend_from_slice(server_url_base64.as_bytes());
+
+        payload_plaintext.push(b'\n');
+        payload_plaintext.extend_from_slice(auth_pk_tag);
+        payload_plaintext.extend_from_slice(tag_separator);
+        payload_plaintext.extend_from_slice(auth_pk_base64.as_bytes());
+
+        payload_plaintext.push(b'\n');
+        payload_plaintext.extend_from_slice(auth_sk_tag);
+        payload_plaintext.extend_from_slice(tag_separator);
+        payload_plaintext.extend_from_slice(auth_sk_base64.as_bytes());
+
+        
+        if self.user_id.as_ref().is_some() {
+            let user_id_tag = b"user_id";
+            let user_id_base64 = BASE64_STANDARD.encode(self.user_id.as_ref().unwrap().as_bytes());
+
+            payload_plaintext.push(b'\n');
+            payload_plaintext.extend_from_slice(user_id_tag);
+            payload_plaintext.extend_from_slice(tag_separator);
+            payload_plaintext.extend_from_slice(user_id_base64.as_bytes());
+
+        }
+
 
         let (encrypted_payload, encrypted_payload_nonce) = crypto::encrypt_xchacha20poly1305(state_file_password_hash, payload_plaintext.as_slice(), None, 0)?;
 
@@ -328,22 +377,142 @@ impl Config {
         loop {
             server_url = prompt_user("Enter server URL: ", true)?;
 
-            server_url = match clean_server_url(server_url.to_string()) {
+            let https_server_url = match clean_server_url(server_url.to_string(), true) {
                 Ok(u) => Zeroizing::new(u),
                 Err(e) => {
                     println!("ERROR: {}\n", e);
                     continue
                 }
             };
+
+            let http_server_url = match clean_server_url(server_url.to_string(), false) {
+                Ok(u) => Zeroizing::new(u),
+                Err(e) => {
+                    println!("ERROR: {}\n", e);
+                    continue
+                }
+            };
+
+
+
+            if requests::get_request(https_server_url.to_string(), None, None, None).is_err() {
+                if requests::get_request(http_server_url.to_string(), None, None, None).is_err() {
+                    println!("Failed to fetch server URL. Check the URl and your proxy settings.");
+                    continue
+                } else {
+                    server_url = http_server_url;
+                }
+            } else {
+                server_url = https_server_url;
+            }
+            
+
             break
         }
+
+
+        println!("Saved: {:?}", server_url);
 
         self.server_url = Some(server_url);
 
         Ok(())
     }
- 
+
     fn authenticate(&mut self) -> Result<(), Error> {
+        let server_url = self.server_url.as_ref().expect("Server_URL empty");
+        let user_id = self.user_id.as_ref();
+
+        if self.auth_secret_key.as_ref().is_none() || self.auth_public_key.as_ref().is_none() {
+            let (new_auth_pk, new_auth_sk) = libcold::crypto::generate_ml_dsa_87_keypair()
+                                                .map_err(|_| Error::FailedToGenerateAuthKeypair)?;
+
+
+            self.auth_public_key = Some(new_auth_pk);
+            self.auth_secret_key = Some(new_auth_sk);
+        }
+
+
+        let auth_pk = self.auth_public_key.as_ref().unwrap();
+        let auth_sk = self.auth_secret_key.as_ref().unwrap();
+
+
+        let mut result = Zeroizing::new(Vec::new());
+
+        if user_id.is_some() {
+            let metadata = &[
+                ("user_id".to_string(), user_id.unwrap().to_string()),
+            ];
+
+            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None)?;
+
+        } else {
+            let pk_encoded = BASE64_STANDARD.encode(auth_pk);
+
+            let metadata = &[
+                ("public_key".to_string(), pk_encoded.to_string()),
+            ];
+
+            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None)?;
+       
+        }
+
+
+        let json_string = String::from_utf8(result.to_vec())
+            .map_err(|_| {
+                println!("Server did not respond with a valid JSON UTF-8 string, are you sure this is a Coldwire messenger server?");
+                Error::InvalidServerResponse
+            })?;
+
+
+        let challenge_base64_encoded = json::extract_json_value(&json_string, "challenge");
+        if challenge_base64_encoded.is_none() {
+            println!("Server did not respond with a valid JSON UTF-8 string, are you sure this is a Coldwire messenger server?");
+            return Err(Error::MalformedServerResponse);
+        }
+
+        let challenge_decoded = BASE64_STANDARD.decode(challenge_base64_encoded.as_ref().unwrap())
+            .map_err(|_| {
+                println!("Server did not give us a valid base64 encoded challenge.");
+                Error::FailedToDecodeBase64
+            })?;
+
+
+        let sig = libcold::crypto::generate_ml_dsa_87_signature(auth_sk, challenge_decoded.as_slice())
+            .map_err(|_| Error::FailedToSignChallenge)?;
+
+        let sig_base64_encoded = BASE64_STANDARD.encode(sig);
+
+        let metadata = &[
+                ("signature".to_string(), sig_base64_encoded),
+                ("challenge".to_string(), challenge_base64_encoded.as_ref().unwrap().to_string()),
+            ];
+
+
+        
+        result = requests::post_request(format!("{}authenticate/verify", server_url.to_string()), None, Some(metadata), None)?;
+
+        
+        let json_string = String::from_utf8(result.to_vec())
+            .map_err(|_| {
+                println!("Server did not respond with a valid JSON UTF-8 string, are you sure this is a Coldwire messenger server?");
+                Error::InvalidServerResponse
+            })?;
+
+
+        let user_id = json::extract_json_value(&json_string, "user_id");
+        let token = json::extract_json_value(&json_string, "token");
+
+
+        if user_id.is_none() || token.is_none() {
+            println!("Server did not respond with a `user_id` nor a `token`, either your account is missing or the server is not a coldwire messenger server.");
+            return Err(Error::MalformedServerResponse);
+        }
+
+        self.user_id = Some(Zeroizing::new(user_id.unwrap()));
+        self.auth_token = Some(Zeroizing::new(token.unwrap()));
+
+        self.save_state_file()?;
+
         Ok(())        
     }
 }
@@ -471,6 +640,11 @@ fn parse_args() -> Result<Config, String> {
 
     return Ok(Config {
         server_url: None,
+
+        user_id: None,
+
+        auth_token: None,
+
         auth_secret_key: None,
         auth_public_key: None,
 
@@ -494,16 +668,26 @@ fn parse_args() -> Result<Config, String> {
 /// - Allow optional :port (0..65535)
 /// - No path/query (ignored)
 /// - Max total length = 512
-fn clean_server_url(mut url: String) -> Result<String, String> {
+fn clean_server_url(mut url: String, enforce_https_prefix: bool) -> Result<String, String> {
+    // overall length cap
     if url.len() > 512 {
         return Err(String::from("URL too long (max 512 chars)"));
     }
 
+    // ensure scheme (check lowercase for detection but keep original for rest)
     let lower = url.to_ascii_lowercase();
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+    if enforce_https_prefix && !lower.starts_with("http://") && !lower.starts_with("https://") {
         url = format!("https://{}", url);
+
+    } else if !enforce_https_prefix && !lower.starts_with("http://") && !lower.starts_with("https://") {
+        url = format!("http://{}", url);
     }
 
+    if !url.ends_with("/") {
+        url = format!("{}/", url);
+    }
+
+    // split scheme://rest
     let parts: Vec<&str> = url.splitn(2, "://").collect();
     if parts.len() != 2 {
         return Err(String::from("missing scheme"));
@@ -514,11 +698,15 @@ fn clean_server_url(mut url: String) -> Result<String, String> {
     }
 
     let rest = parts[1];
-    let netloc = rest.split('/').next().unwrap_or("");
+
+    // split netloc and the rest-of-path (we keep EVERYTHING after the first '/')
+    let mut rest_iter = rest.splitn(2, '/');
+    let netloc = rest_iter.next().unwrap_or("");
+    let path = rest_iter.next().map(|s| format!("/{}", s)).unwrap_or_default();
 
     // Split host[:port]
     let (host, port_opt) = if let Some(i) = netloc.rfind(':') {
-        (&netloc[..i], Some(&netloc[i+1..]))
+        (&netloc[..i], Some(&netloc[i + 1..]))
     } else {
         (netloc, None)
     };
@@ -548,11 +736,13 @@ fn clean_server_url(mut url: String) -> Result<String, String> {
         let port: u16 = port_str
             .parse()
             .map_err(|_| String::from("port is not a valid number"))?;
-        return Ok(format!("{}://{}:{}", scheme, host, port));
+
+        return Ok(format!("{}://{}:{}{}", scheme, host, port, path));
     }
 
-    Ok(format!("{}://{}", scheme, host))
+    Ok(format!("{}://{}{}", scheme, host, path))
 }
+
 
 /// Parse "host:port" into (host, port).
 /// Accepts:
@@ -624,6 +814,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = cfg.authenticate() {
         eprintln!("ERROR: {:?}", e); 
         std::process::exit(1);
+    }
+
+
+    
+
+    let our_user_id = cfg.user_id.as_ref().expect("user_id not initialized, this is an impossible condition. Please open an issue on Github.");
+
+    println!("\n[*] You are authenticated as {:?}", our_user_id);
+
+
+    loop {
+        println!("\n[*] What would you like to do ?");
+        println!("0. List all your contacts user identifiers");
+        println!("1. Check for new add requests and messages");
+        println!("2. Send a message to a contact");
+        println!("3. Delete a contact");
+
+        let result = prompt_user("> ", true)
+            .map_err(|e| {
+                eprintln!("ERROR: {:?}", e); 
+                std::process::exit(1);
+            })?;
+
+        if result == "0" {
+
+
+        }
+
     }
 
     Ok(())

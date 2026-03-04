@@ -27,7 +27,27 @@ pub enum Error {
     FailedToDecodeBase64,
     FailedToSplitLineOnce,
 
-    StateFileCorrupted
+    StateFileCorrupted,
+
+    FailedToSendRequest,
+    FailedToSendRequestBody,
+
+    FailedToReadResponseBody,
+    InvalidRequestMetadata,
+
+    FailedToGenerateAuthKeypair,
+    InvalidRequestBody,
+    
+    ImpossibleConditionButRustForcesUsToReturnError,
+
+    InvalidServerResponse,
+    MalformedServerResponse,
+
+    FailedToSignChallenge
+
+
+
+
 
 
 }
