@@ -24,12 +24,11 @@ pub fn urlencode(data: &[(String, String)]) -> String {
 
 /// Encode a list-style metadata as a single bracketed value:
 /// e.g. [("tags", vec!["a","b"])] -> "tags=%5Ba%2C%20b%5D"
-pub fn urlencode_list_bracketed(data: &[(String, Vec<String>)]) -> String {
+pub fn urlencode_list_not_bracketed(data: &[(String, Vec<String>)]) -> String {
     let mut parts = Vec::new();
     for (k, vec) in data {
-        let joined = vec.join(", ");
-        let bracketed = format!("[{}]", joined);
-        parts.push(format!("{}={}", url_escape(k), url_escape(&bracketed)));
+        let joined = vec.join(", ");        // join elements with comma+space
+        parts.push(format!("{}={}", url_escape(k), url_escape(&joined)));
     }
     parts.join("&")
 }
@@ -53,16 +52,12 @@ mod tests {
 
 
     #[test]
-    fn test_list_bracketed() {
+    fn test_list_not_bracketed() {
         let metadata = [
             ("tags".to_string(), vec!["some".to_string(), "values".to_string(), "like this".to_string()]),
         ];
-        let encoded = urlencode_list_bracketed(&metadata);
+        let encoded = urlencode_list_not_bracketed(&metadata);
         // bracketed value: "[some, values, like this]" percent-encoded
         assert!(encoded.starts_with("tags="));
-        // make sure brackets and spaces were encoded
-        assert!(encoded.contains("%5B"));
-        assert!(encoded.contains("%5D"));
-        assert!(encoded.contains("%20"));
     }
 }

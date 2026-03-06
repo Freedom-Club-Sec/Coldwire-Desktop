@@ -1,4 +1,6 @@
 use std::io::Read;
+use std::io::Write;
+use std::fs::File;
 use ureq::{Agent};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -18,7 +20,9 @@ pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata_s
         full_url = format!("{}?{}", full_url, metadata_str_encoded);
     
     } else if metadata_list.is_some() {
-        let metadata_list_encoded = url_encode::urlencode_list_bracketed(metadata_list.unwrap());
+        // ureq already gives us brackets, so we encode it without brackets.
+        let metadata_list_encoded = url_encode::urlencode_list_not_bracketed(metadata_list.unwrap());
+
         full_url = format!("{}?{}", full_url, metadata_list_encoded);
 
     }
@@ -62,10 +66,6 @@ pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_
         return Err(Error::InvalidRequestBody);
     }
 
-    if metadata_json.is_some() && blob.is_some() {
-        return Err(Error::InvalidRequestBody);
-    }
-
 
 
     let mut config = Agent::config_builder()
@@ -86,6 +86,63 @@ pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_
 
     let mut body = Zeroizing::new(Vec::with_capacity(1024));
 
+    let mut response = if let Some(blob_data) = blob {
+        let boundary = "WebKitFormBoundary1234567890abcdefg";
+        let crlf = "\r\n";
+
+
+        // let metadata_bytes = json::kv_pairs_to_json(metadata).into_bytes();
+
+        let mut body = Vec::new();
+
+
+        if metadata_json.is_some() {
+            let metadata_str = json::kv_pairs_to_json(metadata_json.unwrap());
+             write!(
+                &mut body,
+                "--{boundary}{crlf}Content-Disposition: form-data; name=\"metadata\"{crlf}{crlf}{metadata}{crlf}",
+                boundary = boundary,
+                crlf = crlf,
+                metadata = metadata_str
+             ).map_err(|_| Error::FailedToWriteToRequestBody)?;
+
+        }
+
+
+         write!(
+            &mut body,
+            "--{boundary}{crlf}Content-Disposition: form-data; name=\"blob\"; filename=\"{filename}\"{crlf}Content-Type: application/octet-stream{crlf}{crlf}",
+            boundary = boundary,
+            crlf = crlf,
+            filename = "test_lol.bin"
+        ).map_err(|_| Error::FailedToWriteToRequestBody)?;
+
+        body.extend_from_slice(&blob_data);
+        body.extend_from_slice(crlf.as_bytes());
+
+        // Closing boundary
+        write!(&mut body, "--{boundary}--{crlf}", boundary = boundary, crlf = crlf)
+            .map_err(|_| Error::FailedToWriteToRequestBody)?;
+            
+
+        request = request.header("content-type", format!("multipart/form-data; boundary={}", boundary));
+
+        request
+            .send(body.as_slice())
+            .map_err(|_| Error::FailedToSendRequestBody)?
+      
+    } else if let Some(metadata) = metadata_json {
+        let metadata_bytes = json::kv_pairs_to_json(metadata).into_bytes();
+        request
+            .header("content-type", "application/json")
+            .send(metadata_bytes)
+            .map_err(|_| Error::FailedToSendRequestBody)?
+    } else {
+        return Err(Error::ImpossibleConditionButRustForcesUsToReturnError);
+    };
+
+
+    /*
     let mut response = if let Some(metadata) = metadata_json {
             let metadata_bytes = json::kv_pairs_to_json(metadata).into_bytes();
             request
@@ -99,7 +156,7 @@ pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_
         } else {
             return Err(Error::ImpossibleConditionButRustForcesUsToReturnError);
         };
-
+*/
 
     response
         .body_mut()

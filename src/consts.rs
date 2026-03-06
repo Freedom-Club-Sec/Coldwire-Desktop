@@ -14,3 +14,4 @@ pub const XCHACHA20POLY1305_SIZE_LEN: usize = 2;
 pub const XCHACHA20POLY1305_MAX_RANDOM_PAD: usize = 64;
 
 
+pub const COLDWIRE_LEN_OFFSET: usize = 3; 

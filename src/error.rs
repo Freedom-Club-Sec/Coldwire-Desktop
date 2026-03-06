@@ -43,11 +43,17 @@ pub enum Error {
     InvalidServerResponse,
     MalformedServerResponse,
 
-    FailedToSignChallenge
+    FailedToSignChallenge,
 
+    FailedToExportContact,
+    FailedToImportContact,
+    FailedToInitializeSmp,
+    FailedToWriteToRequestBody,
+    InvalidJsonInServerResponse,
+    NonSuccessServerStatus,
 
-
-
-
+    MalformedData,
+    InvalidDataBlob,
+    FailedToProcessContactBlob,
 
 }
