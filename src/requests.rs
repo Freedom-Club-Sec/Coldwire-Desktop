@@ -5,27 +5,9 @@ use ureq::{Agent};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::Error;
-use crate::url_encode;
 use crate::json;
 
-pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata_str: Option<&[(String, String)]>, metadata_list: Option<&[(String, Vec<String>)]>) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let mut full_url = url;
-
-    if metadata_str.is_some() && metadata_list.is_some() {
-        return Err(Error::InvalidRequestMetadata)
-    }
-
-    if metadata_str.is_some() {
-        let metadata_str_encoded = url_encode::urlencode(metadata_str.unwrap());
-        full_url = format!("{}?{}", full_url, metadata_str_encoded);
-    
-    } else if metadata_list.is_some() {
-        // ureq already gives us brackets, so we encode it without brackets.
-        let metadata_list_encoded = url_encode::urlencode_list_not_bracketed(metadata_list.unwrap());
-
-        full_url = format!("{}?{}", full_url, metadata_list_encoded);
-
-    }
+pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata: Option<&(String, Vec<String>)>) -> Result<Zeroizing<Vec<u8>>, Error> {
 
     let mut config = Agent::config_builder()
         .http_status_as_error(false)
@@ -33,7 +15,14 @@ pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata_s
 
     let agent: Agent = config.into();
 
-    let mut request = agent.get(full_url);
+    let mut request = agent.get(url);
+
+
+    if metadata.is_some() {
+        for m in metadata.unwrap().1.clone() {
+            request = request.query(metadata.unwrap().0.clone(), m);
+        }
+    }
 
     if headers.is_some() {
         for (key, value) in headers.unwrap() {
@@ -177,7 +166,7 @@ mod tests {
     fn test_request_get() {
         let server_url = String::from("https://google.com");
 
-        let result = get_request(server_url, None, None, None);
+        let result = get_request(server_url, None, None);
 
         assert!(!result.is_err(), "Failed to send a GET request to google.com");
     }

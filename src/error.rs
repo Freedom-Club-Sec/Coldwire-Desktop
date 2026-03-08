@@ -56,4 +56,7 @@ pub enum Error {
     InvalidDataBlob,
     FailedToProcessContactBlob,
 
+    FailedToPrepareMessage,
+    FailedToUnlockMessage
+
 }

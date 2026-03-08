@@ -4,7 +4,6 @@ mod json;
 mod consts;
 mod crypto;
 mod requests;
-mod url_encode;
 
 use std::env;
 use std::process::exit;
@@ -426,8 +425,8 @@ impl Config {
 
 
 
-            if requests::get_request(https_server_url.to_string(), None, None, None).is_err() {
-                if requests::get_request(http_server_url.to_string(), None, None, None).is_err() {
+            if requests::get_request(https_server_url.to_string(), None, None).is_err() {
+                if requests::get_request(http_server_url.to_string(), None, None).is_err() {
                     println!("Failed to fetch server URL. Check the URl and your proxy settings.");
                     continue
                 } else {
@@ -545,6 +544,49 @@ impl Config {
         Ok(())        
     }
 
+    fn delete_contact(&mut self) -> Result<(), Error> {
+        let general_id = prompt_user("Choose a contact: ", true)?;
+
+            
+        
+        if let Some(contacts) = self.contact_list.as_mut() {
+        
+            let mut to_remove: Option<usize> = None;
+
+            for (i, contact) in contacts.iter_mut().enumerate() {
+                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
+
+                let ad_str = std::str::from_utf8(ad_bytes)
+                    .expect("additional_data is not valid UTF-8");
+
+                
+                let id = json::extract_json_value(ad_str, "id");
+                let nickname = json::extract_json_value(ad_str, "nickname");
+
+                if !(
+                    nickname.as_ref().map(|n| *n == *general_id).unwrap_or(false)
+                    || id.as_ref().map(|z| &**z == *general_id).unwrap_or(false)
+                ) {
+                    continue;
+                }
+
+                    
+                to_remove = Some(i);
+
+            }
+
+            if let Some(i) = to_remove {
+                contacts.remove(i);
+                println!("[*] Successfully deleted contact\n");
+                self.save_state_file()?;
+                return Ok(());
+            }
+        }
+        
+
+        println!("[!] Contact not found!");
+        Ok(())
+    }
 
     fn add_contact(&mut self) -> Result<(), Error> {
         let mut contact = libcold::Contact::new().expect("Could not create new contact instance");
@@ -560,6 +602,25 @@ impl Config {
 
             break;
         }
+
+        if let Some(contacts) = self.contact_list.as_mut() {
+            for (i, contact) in contacts.iter_mut().enumerate() {
+                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
+
+                let ad_str = std::str::from_utf8(ad_bytes)
+                    .expect("additional_data is not valid UTF-8");
+
+                
+                let cid = json::extract_json_value(ad_str, "id").unwrap();
+
+                if cid == id.as_str() {
+                    println!("You already have the contact saved!");
+                    return Ok(());
+                }
+            }
+        }
+
+
 
         loop {
             question = prompt_user("Enter a question: ", true)?;
@@ -625,9 +686,137 @@ impl Config {
         Ok(())
     }
 
+
+    fn print_contact_list(&mut self) {
+        if let Some(contacts) = self.contact_list.as_ref() {
+            for (i, contact) in contacts.iter().enumerate() {
+                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
+
+                let contact_state = if contact.state  == libcold::ContactState::Verified {
+                    "Verified"
+                } else {
+                    "Pending verification"
+                };
+
+                let ad_str = std::str::from_utf8(ad_bytes)
+                    .expect("additional_data is not valid UTF-8");
+
+                
+                let id = json::extract_json_value(ad_str, "id");
+                let nickname = json::extract_json_value(ad_str, "nickname");
+
+                if nickname.is_some() && !nickname.as_ref().unwrap().is_empty() {
+                    println!("[{}]: {} ({})", i, nickname.unwrap(), contact_state)
+                } else if id.is_some() {
+                    println!("[{}]: {} ({})", i, id.unwrap(), contact_state)
+                } else {
+                    println!("{}", ad_str);
+                    panic!("Congraulations, you have discovered a bug");
+                }
+            }
+        } else {
+            println!("[*] You currently have no contacts in your list.");
+        }
+    }
+    
+    fn send_message(&mut self) -> Result<(), Error> {
+        let server_url = self.server_url.as_ref().unwrap().clone();
+        let auth_token = self.auth_token.as_ref().unwrap();
+
+        let headers = &[
+            ("authorization".to_string(), format!("Bearer {}", auth_token.to_string())),
+        ];
+
+
+
+        let general_id = prompt_user("Choose a contact: ", true)?;
+
+        if let Some(contacts) = self.contact_list.as_mut() {
+            for (i, contact) in contacts.iter_mut().enumerate() {
+                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
+
+                let ad_str = std::str::from_utf8(ad_bytes)
+                    .expect("additional_data is not valid UTF-8");
+
+                
+                let id = json::extract_json_value(ad_str, "id");
+                let nickname = json::extract_json_value(ad_str, "nickname");
+
+                if !(
+                    nickname.as_ref().map(|n| *n == *general_id).unwrap_or(false)
+                    || id.as_ref().map(|z| &**z == *general_id).unwrap_or(false)
+                ) {
+                    continue;
+                }
+
+                if contact.state != libcold::ContactState::Verified {
+                    println!("[!] Contact is not verified!");
+                    println!("[!] Please wait until they're verified and try again.");
+                    return Ok(());
+                }
+
+        
+                let message = prompt_user("Enter your message: ", true)?;
+
+                if message.is_empty() {
+                    println!("[!] Message cannot be empty");
+                    return Ok(());
+                }
+
+
+                let output = contact.send_message(&message)
+                    .map_err(|_| {
+                        Error::FailedToPrepareMessage
+                    })?;
+
+
+                if let libcold::ContactOutput::Wire(output) = output {
+                    let metadata = &[
+                        ("recipient".to_string(), id.unwrap().to_string()),
+                    ];
+
+
+                    for blob in output {
+                        let blob = Zeroizing::new(blob.to_vec());
+
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+
+                        let json_string = String::from_utf8(response.to_vec())
+                            .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
+
+
+                        let status = json::extract_json_value(&json_string, "status");
+                        if status.is_none() {
+                            println!("Server did not respond with a valid JSON UTF-8 string.");
+                            return Err(Error::InvalidJsonInServerResponse);
+                        } else if status.unwrap() != "success" {
+                            println!("Server responded with a non-success status.");
+                            return Err(Error::NonSuccessServerStatus);
+                        }
+                    }
+                }   
+
+
+                contact.i_confirm_message_has_been_sent()
+                    .map_err(|_| {
+                        Error::FailedToUnlockMessage
+                    })?;
+
+                self.save_state_file()?;
+
+                return Ok(());
+        
+            }
+        }
+
+        println!("\n[!] Did not find the specificed contact.");
+
+        Ok(())
+
+    }
     
     fn check_for_new_data(&mut self, old_acks: Vec<String>) -> Result<Vec<String>, Error> {
-        let server_url = self.server_url.as_ref().unwrap();
+        let server_url = self.server_url.as_ref().unwrap().clone();
         let auth_token = self.auth_token.as_ref().unwrap();
 
 
@@ -638,17 +827,17 @@ impl Config {
 
         let mut acks: Vec<String> = Vec::new();
 
-        let metadata_list: Option<Vec<(String, Vec<String>)>> = Some(vec![
+        let metadata_list: Option<(String, Vec<String>)> = Some(
                 ("acks".to_string(), old_acks.clone()),
-            ]);
+            );
 
 
         let mut response;
         
         if old_acks.is_empty() {
-            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), None, None);
+            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), None);
         } else {
-            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), None, metadata_list.as_deref());
+            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), metadata_list.as_ref());
         }
 
         if response.is_err() {
@@ -656,13 +845,21 @@ impl Config {
             return Ok(acks);
         }
 
+        if !old_acks.is_empty() {
+            self.save_state_file()?;
+        }
+
         
         let new_data = utils::decode_blob_stream(&response.unwrap())?;
         let new_data = utils::parse_blobs(new_data)?;
 
 
+
+
         for data in &new_data {
             let mut cl = self.contact_list.as_mut();
+
+            let mut to_remove: Option<usize> = None;
 
             // If we do not have the contact instance, we create it.
             if cl.is_none() {
@@ -682,62 +879,135 @@ impl Config {
                 cl = self.contact_list.as_mut();
             }
 
+
+            let cl = cl.unwrap();
+
             // println!("{:?} Sent by {:?}, ack id is: {:?}", data.blob, data.sender, data.ack_id);
-            for contact in cl.unwrap() {
-                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
-                    
+            for (i, contact) in cl.iter_mut().enumerate() {
+                let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");    
+                let ack_id = general_purpose::URL_SAFE_NO_PAD.encode(data.ack_id);
+
                 let ad_str = std::str::from_utf8(ad_bytes)
                     .expect("additional_data is not valid UTF-8");
 
                     
                 let id = json::extract_json_value(ad_str, "id").unwrap();
+                let nickname = json::extract_json_value(ad_str, "nickname").unwrap();
                 if id != data.sender {
                     continue
                 }
 
 
+                // TODO: Dont panic.
                 let output = contact.process(data.blob.as_slice())
-                    .map_err(|_| Error::FailedToProcessContactBlob)?;
-
-                let output = match output {
-                    libcold::ContactOutput::Wire(w) => w,
-                    _ => panic!("Impossible condition.")
-                };
-
-                
-                let metadata = &[
-                    ("recipient".to_string(), id.to_string()),
-                ];
-
-                for blob in output {
-                    let blob = Zeroizing::new(blob.to_vec());
-
-                    let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
-
-                    let json_string = String::from_utf8(response.to_vec())
-                        .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
+                    .map_err(|e| {
+                        println!("AHHHHHHHHHHHHHHH {:?} ", e);
+                        Error::FailedToProcessContactBlob
+                    })?;
 
 
-                    let status = json::extract_json_value(&json_string, "status");
-                    if status.is_none() {
-                        println!("Server did not respond with a valid JSON UTF-8 string.");
-                        return Err(Error::InvalidJsonInServerResponse);
-                    } else if status.unwrap() != "success" {
-                        println!("Server responded with a non-success status.");
-                        return Err(Error::NonSuccessServerStatus);
+                if contact.state  == libcold::ContactState::Uninitialized {
+                    if nickname.is_empty() {
+                        println!("Contact ({}) have failed SMP verification!", id);
+                    } else {
+                        println!("Contact ({}) nicknamed ({}) have failed SMP verification!", id, nickname);
                     }
-
-
-                    let ack_id = general_purpose::URL_SAFE_NO_PAD.encode(data.ack_id);
-
-                    acks.push(ack_id);
-
-
+                    
+                    to_remove = Some(i);
                 }
 
+                let metadata = &[
+                        ("recipient".to_string(), id.to_string()),
+                    ];
+                
+                if let libcold::ContactOutput::None = output {
+                    acks.push(ack_id.clone());
+                    continue;
+                
+                } else if let libcold::ContactOutput::Wire(output) = output {
+                    for blob in output {
+                        let blob = Zeroizing::new(blob.to_vec());
 
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+
+                        let json_string = String::from_utf8(response.to_vec())
+                            .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
+
+
+                        let status = json::extract_json_value(&json_string, "status");
+                        if status.is_none() {
+                            println!("Server did not respond with a valid JSON UTF-8 string.");
+                            return Err(Error::InvalidJsonInServerResponse);
+                        } else if status.unwrap() != "success" {
+                            println!("Server responded with a non-success status.");
+                            return Err(Error::NonSuccessServerStatus);
+                        }
+                    }
+
+                } else if let libcold::ContactOutput::Prompt(output) = output {
+                    let question = output.question;
+
+                    println!("Contact ({}) wants to verify you, Please answer the question below.", id);
+
+                    println!("Question: {}", question);
 
                 
+                    let answer_str = prompt_user("Answer: ", false)?;
+
+                    let answer = libcold::UserAnswer::new(answer_str).expect("Failed to create answer");
+
+                    let output = match contact.provide_smp_answer(answer) {
+                        Ok(output) => output,
+                        Err(e) => {
+                            println!("We errored while processing SMP answer: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    let blobs = if let libcold::ContactOutput::Wire(blobs) = output {
+                        blobs
+                    } else {
+                        panic!("Expected Wire output, got something else!");
+                    };
+
+
+                    for blob in blobs {
+                        let blob = Zeroizing::new(blob.to_vec());
+
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+
+                        let json_string = String::from_utf8(response.to_vec())
+                            .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
+
+
+                        let status = json::extract_json_value(&json_string, "status");
+                        if status.is_none() {
+                            println!("Server did not respond with a valid JSON UTF-8 string.");
+                            return Err(Error::InvalidJsonInServerResponse);
+                        } else if status.unwrap() != "success" {
+                            println!("Server responded with a non-success status.");
+                            return Err(Error::NonSuccessServerStatus);
+                        }
+
+                    }
+
+                } else if let libcold::ContactOutput::Message(output) = output {
+                    let message = sanitize_message(output.message);
+                    println!("[*] Contact ({}) sent you a new message:\n{}\n\n", id, message);
+
+                } else {
+                    println!("WHAT THE ACTUAL FUCK?????????? {:?}", output);
+                }   
+
+                acks.push(ack_id.clone());
+                continue;
+                
+
+
+
+            }
+            if let Some(i) = to_remove {
+                cl.remove(i);
             }
         }
 
@@ -745,6 +1015,45 @@ impl Config {
     
         Ok(acks)
     }
+}
+
+
+/// Sanitizes a string for terminal-safe printing.
+/// Removes ANSI escape sequences and replaces non-printable characters with '?'.
+pub fn sanitize_message(input: Zeroizing<String>) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Potential start of ANSI sequence
+            if let Some('[') = chars.peek() {
+                chars.next(); // consume '['
+                // Consume until a letter in the range @A-Za-z
+                while let Some(&next) = chars.peek() {
+                    if ('@'..='~').contains(&next) {
+                        chars.next(); // consume the final letter
+                        break;
+                    } else {
+                        chars.next(); // consume intermediate char
+                    }
+                }
+                // ANSI sequence skipped
+                continue;
+            } else {
+                // Lone ESC, replace with '?'
+                result.push('?');
+            }
+        } else if c.is_control() && !matches!(c, '\n' | '\r' | '\t') {
+            // Replace other control chars with '?'
+            result.push('?');
+        } else {
+            // Safe printable char
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 
@@ -1058,15 +1367,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
    
     loop {
-        if !acks.is_empty() {
-            println!("\n[*] We are checking for new data, please be patient.");
-            acks = cfg.check_for_new_data(acks)
-                .map_err(|e| {
-                eprintln!("ERROR: {:?}", e); 
-                std::process::exit(1);
-            })?;
-
-
+        loop {
+            if !acks.is_empty() {
+                println!("\n[*] We are checking for new data, please be patient.");
+                acks = cfg.check_for_new_data(acks)
+                    .map_err(|e| {
+                    eprintln!("ERROR: {:?}", e); 
+                    std::process::exit(1);
+                })?;
+                continue
+            }
+            break;
         }
 
         println!("\n[*] Choose an option:\n");
@@ -1083,30 +1394,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
 
         if *result == "0" {
-            if let Some(contacts) = cfg.contact_list.as_ref() {
-                for (i, contact) in contacts.iter().enumerate() {
-                    let ad_bytes = contact.additional_data.as_ref().expect("Contact does not have additional assosicated data. Impossible condition");
-                    
-                    let ad_str = std::str::from_utf8(ad_bytes)
-                        .expect("additional_data is not valid UTF-8");
-
-                    
-                    let id = json::extract_json_value(ad_str, "id");
-                    let nickname = json::extract_json_value(ad_str, "nickname");
-
-                    if nickname.is_some() && !nickname.as_ref().unwrap().is_empty() {
-                        println!("[{}]: {}", i, nickname.unwrap())
-                    } else if id.is_some() {
-                        println!("[{}]: {}", i, id.unwrap())
-                    } else {
-                        println!("{}", ad_str);
-                        panic!("Congraulations, you have discovered a bug");
-                    }
-                }
-            } else {
-                println!("[*] You currently have no contacts in your list.");
-            }
-
+            println!("\n[*] Your current contacts list:");
+            cfg.print_contact_list();
 
         } else if *result == "1" {
             println!("\n[*] We are checking for new data, please be patient.");
@@ -1118,6 +1407,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+            
+        } else if *result == "2" {
+            println!("\n[*] Choose a contact from below to send the message to: ");
+            cfg.print_contact_list();
+
+            cfg.send_message()
+                .map_err(|e| {
+                    eprintln!("ERROR: {:?}", e); 
+                    std::process::exit(1);
+                })?;
+
         } else if *result == "3" {
             cfg.add_contact()
                 .map_err(|e| {
@@ -1126,6 +1426,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
         }
 
+        else if *result == "4" {
+            println!("\n[*] Choose a contact from below to delete: ");
+            cfg.print_contact_list();
+            cfg.delete_contact()
+                .map_err(|e| {
+                eprintln!("ERROR: {:?}", e); 
+                std::process::exit(1);
+            })?;
+        }
     }
 
     Ok(())
