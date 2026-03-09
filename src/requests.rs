@@ -7,11 +7,60 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::Error;
 use crate::json;
 
-pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata: Option<&(String, Vec<String>)>) -> Result<Zeroizing<Vec<u8>>, Error> {
+#[derive(Zeroize, Debug)]
+#[zeroize(drop)]
+pub struct ProxyInfo {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<Zeroizing<String>>,
+    pub password: Option<Zeroizing<String>>,
 
+    #[zeroize(skip)]
+    pub proxy_type: ProxyType
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ProxyType {
+    Http,
+    Socks4,
+    Socks5,
+}
+
+fn proxy_to_string(proxy: &ProxyInfo) -> String {
+    let scheme = match proxy.proxy_type {
+        ProxyType::Http => "http",
+        ProxyType::Socks4 => "socks4",
+        ProxyType::Socks5 => "socks5",
+    };
+
+    let auth = match (&proxy.username, &proxy.password) {
+        (Some(user), Some(pass)) => {
+            format!("{}:{}@", user.as_str(), pass.as_str())
+        }
+        (Some(user), None) => {
+            format!("{}@", user.as_str())
+        }
+        _ => String::new(),
+    };
+
+    format!("{}://{}{}:{}", scheme, auth, proxy.host, proxy.port)
+}
+
+
+pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata: Option<&(String, Vec<String>)>, proxy: Option<&ProxyInfo>) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut config = Agent::config_builder()
-        .http_status_as_error(false)
-        .build();
+        .http_status_as_error(false);
+
+
+    if proxy.is_some() {
+        let proxy_str = proxy_to_string(&proxy.unwrap());
+        
+        let p = ureq::Proxy::new(&proxy_str).expect("Failed to create proxy instance");
+
+        config = config.proxy(Some(p));
+    }
+
+    let config = config.build();
 
     let agent: Agent = config.into();
 
@@ -50,7 +99,7 @@ pub fn get_request(url: String, headers: Option<&[(String, String)]>, metadata: 
 
 
 
-pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_json: Option<&[(String, String)]>, blob: Option<Zeroizing<Vec<u8>>>) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_json: Option<&[(String, String)]>, blob: Option<Zeroizing<Vec<u8>>>, proxy: Option<&ProxyInfo>) -> Result<Zeroizing<Vec<u8>>, Error> {
     if !metadata_json.is_some() && !blob.is_some() {
         return Err(Error::InvalidRequestBody);
     }
@@ -58,8 +107,18 @@ pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_
 
 
     let mut config = Agent::config_builder()
-        .http_status_as_error(false)
-        .build();
+        .http_status_as_error(false);
+
+
+    if proxy.is_some() {
+        let proxy_str = proxy_to_string(&proxy.unwrap());
+        
+        let p = ureq::Proxy::new(&proxy_str).expect("Failed to create proxy instance");
+
+        config = config.proxy(Some(p));
+    }
+
+    let config = config.build();
 
     let agent: Agent = config.into();
 
@@ -130,22 +189,6 @@ pub fn post_request(url: String, headers: Option<&[(String, String)]>, metadata_
         return Err(Error::ImpossibleConditionButRustForcesUsToReturnError);
     };
 
-
-    /*
-    let mut response = if let Some(metadata) = metadata_json {
-            let metadata_bytes = json::kv_pairs_to_json(metadata).into_bytes();
-            request
-                .header("content-type", "application/json")
-                .send(metadata_bytes)
-                .map_err(|_| Error::FailedToSendRequestBody)?
-        } else if let Some(blob_data) = blob {
-            request
-                .send(blob_data.as_slice())
-                .map_err(|_| Error::FailedToSendRequestBody)?
-        } else {
-            return Err(Error::ImpossibleConditionButRustForcesUsToReturnError);
-        };
-*/
 
     response
         .body_mut()

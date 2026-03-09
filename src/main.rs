@@ -35,31 +35,14 @@ struct Config {
     contact_list: Option<Vec<libcold::Contact>>,
 
     state_file_path: Option<Zeroizing<String>>,
-    proxy: Option<ProxyInfo>,
+    proxy: Option<requests::ProxyInfo>,
     debug: bool,
 
     state_file_password_hash: Option<Zeroizing<Vec<u8>>>,
     state_file_password_hash_salt: Option<Zeroizing<Vec<u8>>>
 }
 
-#[derive(Zeroize, Debug)]
-#[zeroize(drop)]
-struct ProxyInfo {
-    #[zeroize(skip)]
-    proxy_type: ProxyType,    
 
-    host: String,
-    port: u16,
-    username: Option<Zeroizing<String>>,
-    password: Option<Zeroizing<String>>
-}
-
-#[derive(Debug)]
-enum ProxyType {
-    Http,
-    Socks4,
-    Socks5,
-}
 
 impl Config {
     pub fn confirm_proxy_info(&mut self) -> Result<(), Error> {
@@ -425,8 +408,8 @@ impl Config {
 
 
 
-            if requests::get_request(https_server_url.to_string(), None, None).is_err() {
-                if requests::get_request(http_server_url.to_string(), None, None).is_err() {
+            if requests::get_request(https_server_url.to_string(), None, None, self.proxy.as_ref()).is_err() {
+                if requests::get_request(http_server_url.to_string(), None, None, self.proxy.as_ref()).is_err() {
                     println!("Failed to fetch server URL. Check the URl and your proxy settings.");
                     continue
                 } else {
@@ -471,7 +454,7 @@ impl Config {
                 ("user_id".to_string(), user_id.unwrap().to_string()),
             ];
 
-            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None)?;
+            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None, self.proxy.as_ref())?;
 
         } else {
             let pk_encoded = BASE64_STANDARD.encode(auth_pk);
@@ -480,7 +463,7 @@ impl Config {
                 ("public_key".to_string(), pk_encoded.to_string()),
             ];
 
-            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None)?;
+            result = requests::post_request(format!("{}authenticate/init", server_url.to_string()), None, Some(metadata), None, self.proxy.as_ref())?;
        
         }
 
@@ -517,7 +500,7 @@ impl Config {
 
 
         
-        result = requests::post_request(format!("{}authenticate/verify", server_url.to_string()), None, Some(metadata), None)?;
+        result = requests::post_request(format!("{}authenticate/verify", server_url.to_string()), None, Some(metadata), None, self.proxy.as_ref())?;
 
         
         let json_string = String::from_utf8(result.to_vec())
@@ -566,6 +549,7 @@ impl Config {
                 if !(
                     nickname.as_ref().map(|n| *n == *general_id).unwrap_or(false)
                     || id.as_ref().map(|z| &**z == *general_id).unwrap_or(false)
+                    || i.to_string() == *general_id
                 ) {
                     continue;
                 }
@@ -655,7 +639,7 @@ impl Config {
         let blob = Zeroizing::new(output[0].to_vec());
 
 
-        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob), self.proxy.as_ref())?;
 
         let json_string = String::from_utf8(response.to_vec())
             .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
@@ -744,7 +728,7 @@ impl Config {
 
                 if !(
                     nickname.as_ref().map(|n| *n == *general_id).unwrap_or(false)
-                    || id.as_ref().map(|z| &**z == *general_id).unwrap_or(false)
+                    || id.as_ref().map(|z| &**z == *general_id).unwrap_or(false) || i.to_string() == *general_id
                 ) {
                     continue;
                 }
@@ -779,7 +763,7 @@ impl Config {
                     for blob in output {
                         let blob = Zeroizing::new(blob.to_vec());
 
-                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob), self.proxy.as_ref())?;
 
                         let json_string = String::from_utf8(response.to_vec())
                             .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
@@ -835,9 +819,9 @@ impl Config {
         let mut response;
         
         if old_acks.is_empty() {
-            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), None);
+            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), None, self.proxy.as_ref());
         } else {
-            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), metadata_list.as_ref());
+            response = requests::get_request(format!("{}data/longpoll", server_url.to_string()), Some(headers), metadata_list.as_ref(), self.proxy.as_ref());
         }
 
         if response.is_err() {
@@ -899,12 +883,14 @@ impl Config {
 
 
                 // TODO: Dont panic.
-                let output = contact.process(data.blob.as_slice())
-                    .map_err(|e| {
-                        println!("AHHHHHHHHHHHHHHH {:?} ", e);
-                        Error::FailedToProcessContactBlob
-                    })?;
+                let output = contact.process(data.blob.as_slice());
+                if output.is_err() {
+                    println!("Failed to process blob from contact ({}), we are removing them from our list.", id);
+                    to_remove = Some(i);
+                    break;
+                }
 
+                let output = output.unwrap();
 
                 if contact.state  == libcold::ContactState::Uninitialized {
                     if nickname.is_empty() {
@@ -928,7 +914,7 @@ impl Config {
                     for blob in output {
                         let blob = Zeroizing::new(blob.to_vec());
 
-                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob), self.proxy.as_ref())?;
 
                         let json_string = String::from_utf8(response.to_vec())
                             .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
@@ -974,7 +960,7 @@ impl Config {
                     for blob in blobs {
                         let blob = Zeroizing::new(blob.to_vec());
 
-                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob))?;
+                        let response = requests::post_request(format!("{}data/send", server_url.to_string()), Some(headers), Some(metadata), Some(blob), self.proxy.as_ref())?;
 
                         let json_string = String::from_utf8(response.to_vec())
                             .map_err(|_| Error::FailedToConvertBytesToUtf8)?;
@@ -1092,7 +1078,7 @@ fn parse_args() -> Result<Config, String> {
 
     let mut use_proxy = false;
     
-    let mut proxy_type = ProxyType::Socks5;
+    let mut proxy_type = requests::ProxyType::Socks5;
     let mut proxy_addr: Option<Zeroizing<String>> = None;
     let mut proxy_user: Option<Zeroizing<String>> = None;
     let mut proxy_pass: Option<Zeroizing<String>> = None;
@@ -1108,9 +1094,9 @@ fn parse_args() -> Result<Config, String> {
                 if let Some(v) = args.next() {
                     let v_up = v.to_ascii_uppercase();
                     proxy_type = match v_up.as_str() {
-                        "HTTP" => ProxyType::Http,
-                        "SOCKS4" => ProxyType::Socks4,
-                        "SOCKS5" => ProxyType::Socks5,
+                        "HTTP" => requests::ProxyType::Http,
+                        "SOCKS4" => requests::ProxyType::Socks4,
+                        "SOCKS5" => requests::ProxyType::Socks5,
                         other => return Err(format!(
                             "Invalid proxy type: {} (allowed: HTTP, SOCKS4, SOCKS5)",
                             other
@@ -1166,7 +1152,7 @@ fn parse_args() -> Result<Config, String> {
             Err(e) => return Err(format!("Invalid proxy address: {}", e)),
         };
 
-        Some(ProxyInfo {
+        Some(requests::ProxyInfo {
             proxy_type: proxy_type,
             host,
             port,
@@ -1434,6 +1420,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("ERROR: {:?}", e); 
                 std::process::exit(1);
             })?;
+
+        } else {
+            println!("\n[!] Invalid command!\n");
         }
     }
 
